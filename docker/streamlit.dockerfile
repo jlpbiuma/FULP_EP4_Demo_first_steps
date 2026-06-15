@@ -1,6 +1,8 @@
 # Use a lightweight official Python image
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.source=https://github.com/jlpbiuma/FULP_EP4_Demo_first_steps
+
 # Install curl for optional container health checks and Tesseract OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \

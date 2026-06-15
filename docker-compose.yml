@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   # Main Streamlit Web Application
   streamlit-app:
+    image: ghcr.io/jlpbiuma/fulp-demo-streamlit:latest
     build:
       context: .
       dockerfile: docker/streamlit.dockerfile
@@ -18,6 +17,7 @@ services:
 
   # Local Ollama LLM Server with pre-baked model
   ollama:
+    image: ghcr.io/jlpbiuma/fulp-demo-ollama:latest
     build:
       context: .
       dockerfile: docker/ollama.dockerfile
