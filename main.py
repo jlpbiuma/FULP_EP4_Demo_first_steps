@@ -1,9 +1,11 @@
 import streamlit as st
-import pypdf
+import fitz  # PyMuPDF
 import os
-import json
+import io
+import pytesseract
+from PIL import Image
 from enum import Enum
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, Field
 
 # Import LangChain integrations
@@ -12,7 +14,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 # 1. Page Configuration & Custom CSS for premium styling
 st.set_page_config(
-    page_title="Extractor de Identidad LLM",
+    page_title="Extractor de Identidad LLM + OCR",
     page_icon="🆔",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -21,7 +23,6 @@ st.set_page_config(
 # Dark theme custom glassmorphism stylesheet
 st.markdown("""
 <style>
-    /* Styling the main container */
     .reportview-container {
         background: #0f111a;
     }
@@ -29,7 +30,7 @@ st.markdown("""
     /* Clean gradient header */
     .title-container {
         background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
-        padding: 2.5rem;
+        padding: 2rem;
         border-radius: 16px;
         color: white;
         margin-bottom: 2rem;
@@ -39,7 +40,7 @@ st.markdown("""
     .title-container h1 {
         margin: 0;
         font-family: 'Outfit', sans-serif;
-        font-size: 2.5rem;
+        font-size: 2.2rem;
         font-weight: 700;
         letter-spacing: -0.05em;
     }
@@ -56,7 +57,7 @@ st.markdown("""
         padding: 1.5rem;
         border: 1px solid #334155;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        margin-bottom: 1rem;
+        margin-bottom: 1.5rem;
     }
     
     .card-title {
@@ -75,7 +76,7 @@ st.markdown("""
         margin-top: 10px;
     }
     .result-table td {
-        padding: 10px;
+        padding: 12px;
         border-bottom: 1px solid #334155;
     }
     .result-table td.label {
@@ -86,22 +87,23 @@ st.markdown("""
     .result-table td.value {
         color: #f8fafc;
         font-family: monospace;
+        font-size: 1.05rem;
     }
     
     /* Badges */
     .badge-true {
         background-color: #16a34a;
         color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
+        padding: 4px 10px;
+        border-radius: 6px;
         font-size: 0.85rem;
         font-weight: bold;
     }
     .badge-false {
         background-color: #dc2626;
         color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
+        padding: 4px 10px;
+        border-radius: 6px;
         font-size: 0.85rem;
         font-weight: bold;
     }
@@ -111,8 +113,8 @@ st.markdown("""
 # Header Section
 st.markdown("""
 <div class="title-container">
-    <h1>Demo: Extracción Estructurada de Documentos</h1>
-    <p>Sube un documento de identidad (DNI, NIE o Permiso de Residencia) en formato PDF para extraer sus datos mediante Llama 3.1 local</p>
+    <h1>Demo: Pipeline OCR + LLM Estructurado</h1>
+    <p>PDF ➔ Conversión a Imagen ➔ Tesseract OCR (Localización y Texto) ➔ Llama 3.1 Local (Extracción)</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -125,98 +127,123 @@ class TipoIdentificacion(str, Enum):
 class ExtraccionDNI(BaseModel):
     numero_identificacion: str = Field(
         ..., 
-        description="El número de identificación completo extraído del documento (cadena/str, ej: 12345678Z o X1234567L)."
+        description="El número de identificación completo extraído del documento (cadena/str, ej: 12345678Z, X1234567L o similares)."
     )
     ambas_caras: bool = Field(
         ..., 
-        description="Indica si se aprecian ambas caras del documento (anverso y reverso) en la información provista."
+        description="Indica si se aprecian ambas caras del documento (anverso y reverso) según la información y textos de las páginas extraídas."
     )
     fecha_validez: str = Field(
         ..., 
-        description="Fecha de validez o fecha de caducidad del documento con el formato dd/mm/yyyy. Si no se indica o no es clara, dejar en blanco."
+        description="Fecha de validez o caducidad del documento con el formato estricto dd/mm/yyyy. Si no aparece o no se lee bien, dejar vacío."
     )
     tipo_identificacion: TipoIdentificacion = Field(
         ..., 
-        description="El tipo del documento analizado: 'dni', 'nie' o 'permiso de residencia'."
+        description="El tipo del documento detectado: 'dni', 'nie' o 'permiso de residencia'."
     )
 
-# 3. Text Extraction Helper
-def extraer_texto_pdf(uploaded_file) -> str:
-    """Extrae el contenido de texto de un archivo PDF subido."""
-    try:
-        reader = pypdf.PdfReader(uploaded_file)
-        texto = ""
-        for i, page in enumerate(reader.pages):
-            page_text = page.extract_text()
-            if page_text:
-                texto += f"--- PÁGINA {i+1} ---\n{page_text}\n\n"
-        return texto.strip()
-    except Exception as e:
-        st.error(f"Error al leer el archivo PDF: {str(e)}")
-        return ""
+# 3. PDF-to-Image & OCR Pipeline
+def ejecutar_pipeline_ocr(uploaded_file) -> tuple[str, list]:
+    """
+    Convierte el PDF a imágenes, ejecuta Tesseract OCR localmente, y retorna:
+    - Un string con todo el texto concatenado para enviar al LLM.
+    - La lista de bytes de imágenes para poder mostrarlas en la interfaz de usuario.
+    """
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    texto_completo = ""
+    imagenes_bytes = []
 
-# 4. Processing layout
+    for page_idx, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=150)
+        img_data = pix.tobytes("png")
+        imagenes_bytes.append(img_data)
+
+        img = Image.open(io.BytesIO(img_data))
+
+        try:
+            page_text = pytesseract.image_to_string(img, lang="spa")
+            texto_completo += f"--- PÁGINA {page_idx + 1} ---\n{page_text.strip()}\n\n"
+        except Exception as e:
+            st.error(f"Error al ejecutar Tesseract OCR: {str(e)}")
+
+    return texto_completo.strip(), imagenes_bytes
+
+# 4. Streamlit Layout
 col_left, col_right = st.columns([1, 1], gap="large")
+
+# Configuration (Hardcoded default links to Docker network)
+ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 with col_left:
     st.markdown('<div class="card-title">📥 Carga de Documento</div>', unsafe_allow_html=True)
-    pdf_file = st.file_uploader("Arrastra tu PDF aquí o haz clic para buscar", type=["pdf"])
+    pdf_file = st.file_uploader("Arrastra tu PDF de DNI/NIE aquí", type=["pdf"])
     
     st.markdown("<br>", unsafe_allow_html=True)
-    
-    # Connection parameters (Hardcoded to Docker Ollama service or local fallback)
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    
-    st.info(f"Conexión LLM: `{ollama_host}` (Modelo: `llama3.1`)")
+    st.info(f"**Servicios Activos:**\n- OCR: Tesseract (local)\n- LLM: `{ollama_host}` (Modelo: `llama3.1`)")
 
 with col_right:
-    st.markdown('<div class="card-title">📊 Datos Extraídos</div>', unsafe_allow_html=True)
-    
-    if pdf_file is not None:
-        with st.spinner("1. Extrayendo texto del PDF..."):
-            texto_pdf = extraer_texto_pdf(pdf_file)
+    st.markdown('<div class="card-title">📊 Datos Extraídos por LLM</div>', unsafe_allow_html=True)
+
+if pdf_file is not None:
+    # Execution
+    with col_left:
+        st.markdown('<div class="card-title">⚙️ Estado del Procesamiento</div>', unsafe_allow_html=True)
+        
+        with st.spinner("Paso 1: Convirtiendo PDF a Imagen y ejecutando Tesseract OCR..."):
+            ocr_text_llm, page_images = ejecutar_pipeline_ocr(pdf_file)
             
-        if not texto_pdf:
-            st.warning("No se pudo extraer texto del PDF. Asegúrate de que no sea escaneado como imagen pura sin OCR.")
-        else:
-            with col_left:
-                with st.expander("🔍 Ver texto extraído del PDF"):
-                    st.code(texto_pdf, language="text")
+    if not ocr_text_llm:
+        st.warning("No se obtuvo ningún texto a través del servicio de OCR.")
+    else:
+        # Render intermediate visualizations on the left side
+        with col_left:
+            st.success("¡Paso 1/2: OCR Finalizado!")
             
-            with st.spinner("2. Procesando con Llama 3.1..."):
+            # Show preview of PDF page rendered as image
+            for idx, img_b in enumerate(page_images):
+                st.image(img_b, caption=f"Página {idx+1} procesada por Tesseract OCR", use_column_width=True)
+                
+            # Expandable preview of spatial data
+            with st.expander("🔍 Ver texto extraído por Tesseract OCR"):
+                st.code(ocr_text_llm, language="text")
+
+        # LLM processing on the right side
+        with col_right:
+            with st.spinner("Paso 2: Interpretando datos estructurados con Llama 3.1..."):
                 try:
-                    # Initialize the ChatOllama model
+                    # Initialize LLM
                     llm = ChatOllama(
                         model="llama3.1",
                         temperature=0.0,
                         base_url=ollama_host
                     )
                     
-                    # Bind structured output
+                    # Bind structured schema
                     structured_llm = llm.with_structured_output(ExtraccionDNI)
                     
-                    # Create prompt template
+                    # Custom prompt template to help parse spatial coords
                     prompt = ChatPromptTemplate.from_messages([
                         ("system", (
-                            "Eres un asistente especializado en extracción de información. Tu única tarea es extraer la información "
-                            "requerida a partir del texto de un documento de identidad y rellenar el esquema estructurado.\n"
-                            "Normas:\n"
-                            "1. 'numero_identificacion': debe contener el número entero (ej. 12345678A o Y1234567B).\n"
-                            "2. 'ambas_caras': evalúa si el texto indica o describe elementos del anverso y el reverso.\n"
-                            "3. 'fecha_validez': busca la fecha de validez/caducidad y formátala como dd/mm/yyyy. Si no aparece, deja vacío.\n"
-                            "4. 'tipo_identificacion': clasifícalo estrictamente en 'dni', 'nie' o 'permiso de residencia'."
+                            "Eres un agente experto en extracción y validación de documentos oficiales.\n"
+                            "Se te proporciona el texto extraído mediante OCR de un documento de identidad.\n"
+                            "Tu única tarea es analizar el texto para rellenar el esquema estructurado.\n\n"
+                            "Instrucciones clave:\n"
+                            "1. 'numero_identificacion': Extrae el número de DNI (8 números + 1 letra) o NIE (1 letra + 7 números + 1 letra).\n"
+                            "2. 'ambas_caras': Responde 'true' si detectas elementos tanto del anverso (foto del titular, fecha de nacimiento, "
+                            "nombre) como del reverso (nombres de los padres, código de lectura mecánica/MRZ). De lo contrario 'false'.\n"
+                            "3. 'fecha_validez': Localiza la fecha de caducidad o validez del documento y devuélvela como dd/mm/yyyy.\n"
+                            "Si no la encuentras, deja una cadena vacía.\n"
+                            "4. 'tipo_identificacion': Clasifícalo estrictamente en 'dni', 'nie', o 'permiso de residencia'.\n"
                         )),
-                        ("human", "Texto extraído:\n\n{text}")
+                        ("human", "Salida de Tesseract OCR:\n\n{text}")
                     ])
                     
-                    # Run the LangChain chain
                     chain = prompt | structured_llm
-                    resultado: ExtraccionDNI = chain.invoke({"text": texto_pdf})
+                    resultado: ExtraccionDNI = chain.invoke({"text": ocr_text_llm})
                     
-                    # Display structured outcomes
-                    st.success("¡Extracción completada con éxito!")
+                    st.success("¡Paso 2/2: Extracción Estructurada Completada!")
                     
-                    # Render the beautiful table
+                    # Beautiful results table
                     badge_ambas_caras = '<span class="badge-true">SÍ</span>' if resultado.ambas_caras else '<span class="badge-false">NO</span>'
                     
                     html_table = f"""
@@ -241,15 +268,15 @@ with col_right:
                     """
                     st.markdown(html_table, unsafe_allow_html=True)
                     
-                    # Display Raw JSON inside an expander
+                    # Show Raw JSON
                     st.markdown("<br>", unsafe_allow_html=True)
                     with st.expander("⚙️ Ver JSON Estructurado"):
-                        # Format as dict for presentation
                         st.json(resultado.model_dump())
                         
                 except Exception as e:
-                    st.error("Ocurrió un error al consultar el modelo local.")
+                    st.error("Ocurrió un error al consultar el modelo Ollama.")
                     st.error(f"Detalles: {str(e)}")
-                    st.warning("Asegúrate de que Ollama esté corriendo y de haber descargado el modelo llama3.1 (`ollama run llama3.1`).")
-    else:
-        st.info("Sube un archivo PDF en el panel de la izquierda para ver los resultados aquí.")
+                    st.warning("Verifica que el contenedor de Ollama esté corriendo y que el modelo llama3.1 esté descargado.")
+else:
+    with col_right:
+        st.info("Por favor, sube un documento PDF de identidad a la izquierda para iniciar el análisis.")

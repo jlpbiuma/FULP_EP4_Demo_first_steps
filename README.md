@@ -1,87 +1,70 @@
-# Demo: Extractor de Documentos de Identidad con LLM Local
+# Demo: Pipeline OCR + LLM Estructurado en Local
 
-Esta es una pequeña aplicación construida con **Streamlit**, **LangChain** y **Ollama** diseñada para automatizar la extracción de datos de documentos de identidad (DNI, NIE o Permiso de Residencia) en formato PDF utilizando un modelo LLM en local (`llama3.1`).
+Esta aplicación demuestra un pipeline de extracción de información de documentos de identidad (DNI, NIE o Permiso de Residencia) combinando **OCR (Optical Character Recognition)** y **LLMs locales**. 
 
-La aplicación está completamente dockerizada, no requiere de archivos `.env` (todas las configuraciones están declaradas en Docker Compose o parametrizadas en el código) y cuenta con soporte para depuración local en VS Code mediante `uv`.
-
----
-
-## 🎯 Requisitos de Extracción
-
-El sistema analiza el texto extraído del PDF y retorna de forma estructurada los siguientes campos obligatorios:
-1. **Número de Identificación** (`numero_identificacion`): Cadena de texto (`str`) con el identificador completo (ej: DNI o NIE con letra).
-2. **Ambas caras** (`ambas_caras`): Booleano (`bool`) que especifica si la información leída indica que el PDF contiene el documento por ambas caras (anverso y reverso).
-3. **Fecha de validez** (`fecha_validez`): Fecha de caducidad en formato estructurado `dd/mm/yyyy` (cadena vacía si no se detecta).
-4. **Tipo de identificación** (`tipo_identificacion`): Tipo de documento detectado, limitado estrictamente a: `dni`, `nie` o `permiso de residencia`.
+El flujo de trabajo es el siguiente:
+1. **Carga del PDF:** El usuario sube un archivo PDF del documento.
+2. **Conversión a Imagen:** La aplicación Streamlit convierte cada página del PDF en una imagen PNG usando `PyMuPDF` (`fitz`).
+3. **Servicio PaddleOCR:** La imagen se envía a un microservicio local de **FastAPI + PaddleOCR** que detecta el texto y sus coordenadas en la página.
+4. **Formateo Espacial:** Streamlit organiza las lecturas en una cadena espacializada (ej: `Coordenadas: [[x, y], ...] | Texto: "CADUCIDAD"`).
+5. **Inferencia LLM (Llama 3.1):** Esta estructura visual-textual se envía al modelo local `llama3.1` mediante `ChatOllama` y LangChain. El LLM interpreta la disposición de los datos y los extrae en un esquema de **Pydantic** limpio y estructurado (`with_structured_output`).
 
 ---
 
-## 🚀 Cómo Ejecutar la Aplicación con Docker Compose
+## 🛠️ Arquitectura de Servicios (Docker Compose)
 
-La aplicación arranca con un único comando. Docker Compose levantará tanto el servidor de Ollama, un contenedor auxiliar que descarga automáticamente el modelo `llama3.1`, y el servicio web de Streamlit.
+La aplicación utiliza tres contenedores declarados en `docker-compose.yml`:
+1. `streamlit-app` (Puerto `8501`): Interfaz web de usuario y coordinamiento del pipeline.
+2. `paddle-ocr` (Puerto `8000`): Microservicio REST en Python 3.10 que envuelve la librería `paddleocr` y procesa las imágenes.
+3. `ollama` (Puerto `11434`): Motor de LLM en local. Su Dockerfile descarga automáticamente el modelo `llama3.1` en la fase de construcción.
 
-### Pasos:
+---
 
-1. Asegúrate de tener instalado **Docker** y **Docker Compose** en tu sistema.
-2. Desde la raíz de este proyecto, ejecuta:
+## 🚀 Cómo Ejecutar la Aplicación
+
+Para desplegar y probar la aplicación completa con todos sus servicios:
+
+1. Ejecuta el comando de inicio en la raíz de tu proyecto:
    ```bash
    docker compose up --build
    ```
-3. El servicio `ollama-pull-model` se conectará al servicio de Ollama y descargará automáticamente el modelo `llama3.1` (esto puede tomar varios minutos la primera vez dependiendo de tu velocidad de conexión a Internet).
-4. Una vez completado, abre tu navegador e ingresa a:
+   *(Nota: La construcción del contenedor `ollama` descargará el modelo llama3.1 de forma integrada, y la del contenedor `paddle-ocr` descargará los pesos del detector y reconocedor OCR por defecto en su primera inicialización, lo que puede tardar unos minutos).*
+
+2. Abre tu navegador e ingresa a:
    * **Streamlit App:** [http://localhost:8501](http://localhost:8501)
-   * **Ollama API (Verificación):** [http://localhost:11434](http://localhost:11434)
+   * **PaddleOCR Endpoint:** [http://localhost:8000/docs](http://localhost:8000/docs) (Para probar la API de OCR de forma aislada)
+   * **Ollama API:** [http://localhost:11434](http://localhost:11434)
 
 ---
 
 ## 🔧 Desarrollo y Depuración Local (VS Code + `uv`)
 
-Si deseas ejecutar la aplicación localmente fuera de Docker (para hacer debugging con puntos de interrupción directamente en el código), sigue estos pasos:
+Si quieres depurar el código de Streamlit de forma interactiva en tu máquina:
 
-### 1. Preparar el entorno con `uv`
-Dado que el proyecto utiliza el gestor `uv`, puedes instalar todas las dependencias locales en el entorno virtual (`.venv`) ejecutando:
+### 1. Sincronizar el entorno virtual
+Instala las dependencias declaradas en `pyproject.toml` en tu máquina local:
 ```bash
 uv sync --link-mode=copy
 ```
 
-### 2. Levantar el servicio Ollama en Docker
-Para no consumir recursos instalando Ollama en tu sistema operativo principal, puedes iniciar únicamente el contenedor de Ollama desde Docker Compose:
+### 2. Iniciar servicios externos en Docker
+Para no tener que instalar PaddleOCR ni Ollama nativos, levanta únicamente los contenedores de backend:
 ```bash
-docker compose up -d ollama
+docker compose up -d ollama paddle-ocr
 ```
 
-*Nota: Asegúrate de descargar el modelo en tu Ollama local ejecutando:*
-```bash
-docker exec -it ollama ollama pull llama3.1
-```
-
-### 3. Iniciar la depuración desde VS Code
-El proyecto incluye un archivo `.vscode/launch.json` configurado para este propósito:
-1. Abre este directorio en VS Code.
-2. Abre la pestaña de **Run and Debug** (o presiona `Ctrl+Shift+D` / `Cmd+Shift+D`).
-3. Selecciona la configuración **"Streamlit App"**.
-4. Pulsa el botón verde **Play** (o presiona `F5`).
-5. VS Code iniciará la aplicación de Streamlit usando el binario Python del entorno local `.venv` y adjuntará el depurador para capturar breakpoints y excepciones.
+### 3. Ejecutar el Debugger en VS Code
+1. Abre este directorio con VS Code.
+2. Presiona `Cmd+Shift+D` o `Ctrl+Shift+D` para abrir el panel de depuración.
+3. Selecciona la configuración **"Streamlit App"** y presiona `F5`.
+4. El depurador local se conectará a la instancia de Streamlit en tu máquina, permitiendo establecer breakpoints. La aplicación utilizará por defecto `http://localhost:8000` para el OCR y `http://localhost:11434` para Ollama.
 
 ---
 
-## 🧠 ¿Cómo funciona la Extracción Estructurada?
+## 📄 Datos Extraídos del Documento
 
-La aplicación utiliza el método `with_structured_output` provisto por la integración `langchain-ollama`.
-
-1. **Definición del Esquema:** Declaramos una estructura de datos estricta usando **Pydantic**:
-   ```python
-   class ExtraccionDNI(BaseModel):
-       numero_identificacion: str
-       ambas_caras: bool
-       fecha_validez: str
-       tipo_identificacion: TipoIdentificacion  # (Enum: 'dni', 'nie', 'permiso de residencia')
-   ```
-
-2. **Asociación del Modelo:** Pasamos este esquema a nuestro LLM local:
-   ```python
-   llm = ChatOllama(model="llama3.1", base_url="http://localhost:11434")
-   structured_llm = llm.with_structured_output(ExtraccionDNI)
-   ```
-
-3. **Inferencia:** El LLM genera una respuesta en formato JSON que respeta exactamente los tipos de datos descritos en la clase Pydantic, garantizando que el backend de Streamlit reciba datos limpios y listos para ser consumidos o guardados.
+El pipeline retornará un JSON estructurado bajo el siguiente esquema:
+* `numero_identificacion`: El número del documento de identidad como string (con letras).
+* `ambas_caras`: Boolean indicando si se detectaron los elementos del anverso y reverso.
+* `fecha_validez`: Fecha en formato estricto `dd/mm/yyyy` (o cadena vacía si no se detecta).
+* `tipo_identificacion`: Tipo de documento clasificado estrictamente como `dni`, `nie` o `permiso de residencia`.
