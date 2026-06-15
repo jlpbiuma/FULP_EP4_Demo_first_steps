@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  # Main Streamlit Web Application
+  streamlit-app:
+    build:
+      context: .
+      dockerfile: docker/streamlit.dockerfile
+    container_name: streamlit-app
+    ports:
+      - "8501:8501"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+  # Local Ollama LLM Server with pre-baked model
+  ollama:
+    build:
+      context: .
+      dockerfile: docker/ollama.dockerfile
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+    name: ollama_data

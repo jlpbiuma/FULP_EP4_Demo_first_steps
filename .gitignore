@@ -11,3 +11,4 @@ wheels/
 # Evitar que se suban metadatos de macOS en discos externos
 ._*
 .DS_Store
+*.pdf
