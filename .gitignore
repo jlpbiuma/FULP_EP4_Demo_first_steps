@@ -8,4 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
-**/._*
+# Evitar que se suban metadatos de macOS en discos externos
+._*
+.DS_Store
